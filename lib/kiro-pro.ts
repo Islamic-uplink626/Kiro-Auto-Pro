@@ -34,6 +34,46 @@ const PLAN_CARDS_ANCHOR_SELECTORS = [
   'text=/KIRO\\s+PRO/i'
 ]
 
+/** AWS cookie-consent banner (`awsccc-*`) pins itself to the bottom of the
+ *  Kiro SPA and intercepts clicks on the plan-card buttons that sit behind
+ *  it. It appears on every fresh context / incognito session.
+ *
+ *  We dismiss by clicking Decline (most conservative) — Accept would opt the
+ *  headless session into marketing cookies, which is both unnecessary and
+ *  noisier. If Decline isn't rendered (some regions), fall back to Accept
+ *  just to clear the overlay. */
+const AWS_COOKIE_BANNER_SELECTOR =
+  '#awsccc-cb-content, [data-id="awsccc-cb-btn-accept"], [data-id="awsccc-cb-btn-decline"]'
+
+const AWS_COOKIE_BANNER_DISMISS_SELECTORS = [
+  'button[data-id="awsccc-cb-btn-decline"]',
+  'button[data-id="awsccc-cb-btn-accept"]'
+]
+
+async function dismissAwsCookieBanner(page: Page, log: LogCallback): Promise<boolean> {
+  const visible = await page
+    .locator(AWS_COOKIE_BANNER_SELECTOR)
+    .first()
+    .isVisible()
+    .catch(() => false)
+  if (!visible) return false
+  for (const sel of AWS_COOKIE_BANNER_DISMISS_SELECTORS) {
+    const btn = page.locator(sel).first()
+    const btnVisible = await btn.isVisible().catch(() => false)
+    if (!btnVisible) continue
+    try {
+      await btn.click({ timeout: 4000 })
+      log(`[pro] dismissed AWS cookie banner via ${sel}`)
+      await page.waitForTimeout(500)
+      return true
+    } catch {
+      continue
+    }
+  }
+  log('[pro] WARN: AWS cookie banner present but no dismiss button clickable')
+  return false
+}
+
 const PRO_BADGE_LOCATORS = [
   // STRONGEST signal — Kiro writes this on the Mantine Badge component on
   // every authenticated page:
@@ -193,6 +233,10 @@ export async function checkProStatus(
   } catch {
     // Proceed with anchor + poll anyway.
   }
+
+  // Dismiss the AWS cookie-consent banner if present — it overlays the plan
+  // cards and intercepts clicks on the upgrade buttons.
+  await dismissAwsCookieBanner(page, log)
 
   // Wait for the plan-cards container to render. This is the authoritative
   // "the SPA is done fetching and painting" signal — any earlier poll is
@@ -381,6 +425,11 @@ export async function clickUpgradeToPro(
 ): Promise<UpgradeClickResult> {
   const context = page.context()
 
+  // Make sure the AWS cookie-consent banner isn't occluding the click target.
+  // checkProStatus already dismisses it, but clickUpgradeToPro is a public
+  // entry point too — so we guard here as well.
+  await dismissAwsCookieBanner(page, log)
+
   // Resolve the upgrade button first so we don't race the click-before-visible.
   // Caller may run us before the SPA has mounted its Account header — poll.
   const chosenSelector = await waitForUpgradeButton(page, 30000)
@@ -407,7 +456,12 @@ export async function clickUpgradeToPro(
     .catch(() => null)
 
   try {
-    await page.locator(chosenSelector).first().click({ timeout: 5000 })
+    const target = page.locator(chosenSelector).first()
+    await target.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {})
+    // Re-verify dismissal right before the click — the banner can re-flash
+    // if the SPA re-mounts it on route change.
+    await dismissAwsCookieBanner(page, log)
+    await target.click({ timeout: 5000 })
   } catch (e) {
     return {
       success: false,
