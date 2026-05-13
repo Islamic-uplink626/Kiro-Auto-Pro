@@ -142,6 +142,33 @@ const CONSENT_TEXTS = [
   'permissions that kiro needs'
 ]
 
+/** Google OAuth "Kiro wants to access your Google Account — Continue" screen.
+ *  Lives at:
+ *    accounts.google.com/signin/oauth/id
+ *    accounts.google.com/signin/oauth/consent
+ *    accounts.google.com/signin/oauth/warning
+ *    accounts.google.com/o/oauth2/auth
+ *
+ *  This is a normal OAuth flow step, NOT a blocker — we just need to click
+ *  "Continue" / "Allow". The button label varies ("Continue", "Allow",
+ *  "Accept", "Izinkan") but the primary CTA is always `<button jsname="LgbsSe">`
+ *  on these pages. */
+const GOOGLE_OAUTH_CONSENT_URL_RE =
+  /accounts\.google\.com\/(?:signin\/oauth\/(?:id|consent|warning|oauthchooseaccount)|o\/oauth2\/auth)/i
+
+const GOOGLE_OAUTH_CONSENT_SELECTORS = [
+  'button[jsname="LgbsSe"][data-primary-action-label]',
+  'button[jsname="LgbsSe"]:has-text("Continue")',
+  'button[jsname="LgbsSe"]:has-text("Allow")',
+  'button[jsname="LgbsSe"]:has-text("Accept")',
+  'button[jsname="LgbsSe"]:has-text("Lanjutkan")', // id
+  'button[jsname="LgbsSe"]:has-text("Izinkan")',   // id
+  'button:has-text("Continue")',
+  'button:has-text("Allow")',
+  'div[role="button"]:has-text("Continue")',
+  'div[role="button"]:has-text("Allow")'
+]
+
 async function humanDelay(min = 120, max = 320): Promise<void> {
   const ms = Math.floor(Math.random() * (max - min + 1)) + min
   return new Promise((r) => setTimeout(r, ms))
@@ -196,6 +223,15 @@ type Blocker =
 
 async function detectBlocker(page: Page): Promise<Blocker | null> {
   const url = page.url()
+
+  // OAuth consent screen has its own auto-handler — never treat it as a
+  // blocker. Body text on this page contains "wants access" (matches
+  // CONSENT_TEXTS) AND the page hosts an invisible reCAPTCHA v3 iframe,
+  // so without this short-circuit detectBlocker false-positives twice.
+  if (GOOGLE_OAUTH_CONSENT_URL_RE.test(url)) {
+    return null
+  }
+
   for (const { re, kind } of CHALLENGE_PATH_REGEXES) {
     if (re.test(url)) return { kind: 'challenge', subtype: kind }
   }
@@ -276,6 +312,12 @@ async function waitForHostChange(
       continue
     }
 
+    // Auto-resolve the OAuth scope-consent screen — fresh GSuite accounts
+    // hit it on every first-time Kiro authorization.
+    if (await handleGoogleOAuthConsentIfPresent(page, log)) {
+      continue
+    }
+
     const blocker = await detectBlocker(page)
     if (blocker) {
       log(`[google-login] blocker while waiting for ${allowedHosts.join('|')}: ${blocker.kind}`)
@@ -302,6 +344,57 @@ async function handleSpeedbumpIfPresent(page: Page, log: LogCallback): Promise<b
   }
   // Let the navigation happen before the caller re-checks host.
   await page.waitForTimeout(1500)
+  return true
+}
+
+/**
+ * Auto-resolve the Google OAuth scope-consent screen.
+ *
+ * Fresh GSuite accounts that have never authorised Kiro before get sent here:
+ *   accounts.google.com/signin/oauth/id?...client_id=...kiro-prod...
+ *
+ * The page renders a "Kiro wants to access your Google Account" prompt with
+ * a single primary CTA ("Continue" / "Allow"). Without a click, the OAuth
+ * flow stalls and Kiro's callback never fires — surfaces as either
+ * `callback_timeout` or our text-matching `consent_screen_unexpected`
+ * misclassification.
+ *
+ * Returns true if we clicked through, so the caller knows to re-check host
+ * on the next loop iteration.
+ */
+async function handleGoogleOAuthConsentIfPresent(
+  page: Page,
+  log: LogCallback
+): Promise<boolean> {
+  const url = page.url()
+  if (!GOOGLE_OAUTH_CONSENT_URL_RE.test(url)) return false
+
+  // Body-text sanity: the OAuth consent always mentions "wants access" or
+  // "permissions". Skip if neither is present — we may have caught a
+  // different /oauth/* route.
+  let bodyText = ''
+  try {
+    bodyText = ((await page.textContent('body', { timeout: 1500 })) ?? '').toLowerCase()
+  } catch {
+    bodyText = ''
+  }
+  const isConsent =
+    bodyText.includes('wants access') ||
+    bodyText.includes('permission') ||
+    bodyText.includes('izinkan') ||
+    bodyText.includes('lanjutkan')
+  if (!isConsent) return false
+
+  log('[google-login] Google OAuth scope-consent screen detected, auto-confirming')
+  // Render delay — the primary CTA is JS-instantiated on these pages.
+  await page.waitForTimeout(1200)
+  const clicked = await clickFirst(page, GOOGLE_OAUTH_CONSENT_SELECTORS, 10000)
+  if (!clicked) {
+    log('[google-login] OAuth consent CTA not found — staying on page')
+    return false
+  }
+  // Allow the post-consent redirect chain (back through Cognito) to settle.
+  await page.waitForTimeout(2000)
   return true
 }
 
@@ -449,6 +542,9 @@ export async function registerViaKiroGoogle(
         break
       }
       if (await handleSpeedbumpIfPresent(page, log)) continue
+      // Some Workspace accounts are routed straight to OAuth consent if the
+      // tenant has SSO enabled. Auto-resolve before classifying as a blocker.
+      if (await handleGoogleOAuthConsentIfPresent(page, log)) continue
       const blocker = await detectBlocker(page)
       if (blocker) return classifyBlocker(blocker)
       passwordSel = await findFirstVisible(page, PASSWORD_INPUT_LOCATORS, 1500)
@@ -488,6 +584,11 @@ export async function registerViaKiroGoogle(
       return { success: true, finalUrl: page.url() }
     }
     if (await handleSpeedbumpIfPresent(page, log)) continue
+    // Auto-resolve the Google OAuth scope-consent screen — fires for fresh
+    // GSuite accounts that have never authorized Kiro before. Without this
+    // we'd misclassify it via CONSENT_TEXTS as `consent_screen_unexpected`
+    // OR time out as `callback_timeout`.
+    if (await handleGoogleOAuthConsentIfPresent(page, log)) continue
     const blocker = await detectBlocker(page)
     if (blocker) return classifyBlocker(blocker)
     await page.waitForTimeout(600)
