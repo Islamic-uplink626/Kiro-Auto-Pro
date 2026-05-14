@@ -49,6 +49,24 @@ export type GeneratedToVccOptions = {
   idStrategy?: 'auto' | 'random'
 }
 
+/**
+ * Map a free-form scheme slug ("visa", "american-express", "china-union-pay",
+ * "diners-club") to one of the canonical VccEntry brand values. Unknown
+ * schemes return undefined so callers can fall back to PAN-based detection.
+ */
+function mapSchemeToBrand(scheme?: string): VccEntry['brand'] | undefined {
+  if (!scheme) return undefined
+  const n = scheme.toLowerCase().trim().replace(/[\s_]+/g, '-')
+  if (!n) return undefined
+  if (n === 'visa') return 'visa'
+  if (n === 'mastercard' || n === 'master-card' || n === 'mc') return 'mastercard'
+  if (n === 'amex' || n === 'american-express' || n === 'americanexpress') return 'amex'
+  if (n === 'jcb') return 'jcb'
+  if (n === 'discover') return 'discover'
+  if (n === 'diners' || n === 'diners-club' || n === 'diners-club-international') return 'diners'
+  return 'other'
+}
+
 export function generatedToVcc(
   cards: GeneratedCard[],
   opts: GeneratedToVccOptions,
@@ -87,7 +105,7 @@ export function generatedToVcc(
       opts.idStrategy === 'random'
         ? `gen-${last4}-${exp}-${Math.random().toString(36).slice(2, 8)}`
         : `${last4}-${exp}-gen${idx + 1}`
-    const brand = (c.scheme as VccEntry['brand']) ?? detectBrand(c.pan)
+    const brand = mapSchemeToBrand(c.scheme) ?? detectBrand(c.pan)
     const label = opts.labelPrefix
       ? `${opts.labelPrefix} ${last4} #${idx + 1}`
       : `Generated card ${last4} #${idx + 1}${binInfo?.bank?.name ? ` (${binInfo.bank.name})` : ''}`

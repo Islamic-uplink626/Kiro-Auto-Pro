@@ -50,16 +50,45 @@ const SCHEME_LENGTHS: Record<string, number[]> = {
   visa: [13, 16, 19],
   mastercard: [16],
   amex: [15],
+  'american-express': [15],
   discover: [16, 19],
   jcb: [16, 19],
   diners: [14, 16, 19],
+  'diners-club': [14, 16, 19],
+  'diners-club-international': [14, 16, 19],
   unionpay: [16, 17, 18, 19],
-  maestro: [12, 13, 14, 15, 16, 17, 18, 19]
+  'union-pay': [16, 17, 18, 19],
+  'china-union-pay': [16, 17, 18, 19],
+  'china-unionpay': [16, 17, 18, 19],
+  maestro: [12, 13, 14, 15, 16, 17, 18, 19],
+  rupay: [16],
+  mir: [16],
+  elo: [16],
+  hipercard: [16, 19]
+}
+
+const AMEX_ALIASES = new Set([
+  'amex',
+  'american-express',
+  'americanexpress',
+  'american express'
+])
+
+function normalizeScheme(scheme?: string): string | undefined {
+  if (!scheme) return undefined
+  return scheme.toLowerCase().trim().replace(/\s+/g, '-')
+}
+
+function isAmex(scheme?: string): boolean {
+  const n = normalizeScheme(scheme)
+  return n ? AMEX_ALIASES.has(n) : false
 }
 
 function defaultLength(scheme?: string): number {
-  if (!scheme) return 16
-  const ls = SCHEME_LENGTHS[scheme.toLowerCase()]
+  const n = normalizeScheme(scheme)
+  if (!n) return 16
+  if (isAmex(n)) return 15
+  const ls = SCHEME_LENGTHS[n]
   if (!ls || ls.length === 0) return 16
   // Pick the most common length — first in the list (longest support array
   // would be wrong; standardize on the canonical 16, 15, etc.).
@@ -115,7 +144,7 @@ function pickExpiry(now: Date): { expMonth: number; expYear: number } {
 }
 
 function pickCvc(scheme?: string, override?: 3 | 4): string {
-  const len = override ?? (scheme?.toLowerCase() === 'amex' ? 4 : 3)
+  const len = override ?? (isAmex(scheme) ? 4 : 3)
   // Avoid CVC 000 / 0000 — issuers commonly reject these test sentinels.
   for (let attempt = 0; attempt < 4; attempt++) {
     const c = randomDigits(len)
@@ -155,7 +184,7 @@ export function generateCards(opts: GenerateCardOptions): GeneratedCard[] {
       expMonth: exp.expMonth,
       expYear: exp.expYear,
       cvc: pickCvc(opts.scheme, opts.cvcLength),
-      scheme: opts.scheme,
+      scheme: normalizeScheme(opts.scheme),
       length: total,
       bin: cleanedBin
     })

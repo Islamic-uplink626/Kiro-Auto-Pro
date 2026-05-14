@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, rename } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { request } from 'undici'
 import { gunzipSync } from 'node:zlib'

@@ -118,10 +118,11 @@ export class BinCache {
     return Object.keys(this.file.entries).length
   }
 
-  /** All cached BinInfo rows for one BIN (any source). */
+  /** All cached BinInfo rows for one BIN (any source) — expired entries skipped. */
   forBin(bin: string): BinInfo[] {
+    const now = Date.now()
     return Object.values(this.file.entries)
-      .filter((e) => e.info.bin === bin)
+      .filter((e) => e.info.bin === bin && (e.expiresAt <= 0 || e.expiresAt >= now))
       .map((e) => e.info)
   }
 }

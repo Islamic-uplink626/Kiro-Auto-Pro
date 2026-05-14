@@ -124,6 +124,7 @@ export function applyFilter(rows: BinInfo[], filter: BinFilter | undefined): Bin
 const BANK_SOURCE_CONFIDENCE: Record<string, number> = {
   vccgenerator: 100,
   'bincheck-details': 90,
+  handyapi: 85,
   binlist: 80,
   bincheck: 70,
   bincodes: 65,

@@ -8,6 +8,7 @@ import {
 import { lookupBincheckDetails } from './sources/bincheck-details'
 import { VccGeneratorClient } from './sources/vccgenerator'
 import { scrapeBincodes } from './sources/bincodes'
+import { lookupHandyApi } from './sources/handyapi'
 import { applyFilter, mergeBinInfo, type BinFilter, type BinInfo } from './types'
 
 /**
@@ -20,10 +21,11 @@ import { applyFilter, mergeBinInfo, type BinFilter, type BinInfo } from './types
  *   1. cache         (offline, instant)
  *   2. local-db      (offline, ships free dataset)
  *   3. binlist.net   (free public REST, 5/h rate limit)
- *   4. bincheck.io   (DataTables JSON, CF challenge possible)
- *   5. bincheck/details   (server-rendered HTML — used when JSON gated)
- *   6. vccgenerator.org   (cascading XHR, gives bank+country exact)
- *   7. bincodes.com  (stealth-browser scrape — last resort, slowest)
+ *   4. handyapi      (free public REST, generous rate limit, multi-region)
+ *   5. bincheck.io   (DataTables JSON, CF challenge possible)
+ *   6. bincheck/details   (server-rendered HTML — used when JSON gated)
+ *   7. vccgenerator.org   (cascading XHR, gives bank+country exact)
+ *   8. bincodes.com  (stealth-browser scrape — last resort, slowest)
  *
  * The orchestrator is concurrency-aware: HTTP sources run in parallel
  * (each is independent), the scraper source runs only if every faster
@@ -55,6 +57,7 @@ export type BinSourceName =
   | 'cache'
   | 'local-db'
   | 'binlist'
+  | 'handyapi'
   | 'bincheck'
   | 'bincheck-details'
   | 'vccgenerator'
@@ -64,6 +67,7 @@ export const DEFAULT_SOURCE_PRIORITY: BinSourceName[] = [
   'cache',
   'local-db',
   'binlist',
+  'handyapi',
   'bincheck',
   'bincheck-details',
   'vccgenerator',
@@ -218,6 +222,18 @@ export class BinAggregator {
         return r.ok
           ? { source: 'binlist', ok: true, info: r.info, durationMs: Date.now() - t0 }
           : { source: 'binlist', ok: false, reason: r.reason, durationMs: Date.now() - t0 }
+      })
+    }
+    if (this.opts.sources.includes('handyapi')) {
+      jobs.push(async () => {
+        const t0 = Date.now()
+        const r = await lookupHandyApi(bin, {
+          timeoutMs: this.opts.timeoutMs,
+          log: this.opts.log
+        })
+        return r.ok
+          ? { source: 'handyapi', ok: true, info: r.info, durationMs: Date.now() - t0 }
+          : { source: 'handyapi', ok: false, reason: r.reason, durationMs: Date.now() - t0 }
       })
     }
     if (this.opts.sources.includes('bincheck')) {

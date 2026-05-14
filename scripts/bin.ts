@@ -622,10 +622,10 @@ async function interactiveMenu(initial: CliFlags): Promise<void> {
 
   const banner = () => {
     print('')
-    log('bright', '╔══════════════════════════════════════════════════╗')
-    log('bright', '║  Kiro Auto — BIN Search / Finder / Generator     ║')
-    log('bright', '║  binlist + bincheck + vccgen + bincodes + local  ║')
-    log('bright', '╚══════════════════════════════════════════════════╝')
+    log('bright', '╔══════════════════════════════════════════════════════════╗')
+    log('bright', '║  Kiro Auto — BIN Search / Finder / Generator             ║')
+    log('bright', '║  binlist + handyapi + bincheck + vccgen + bincodes + db  ║')
+    log('bright', '╚══════════════════════════════════════════════════════════╝')
   }
 
   let running = true
@@ -724,7 +724,7 @@ async function interactiveMenu(initial: CliFlags): Promise<void> {
         break
       case 'r': {
         const csv = await askD(
-          'sources CSV (cache,local-db,binlist,bincheck,bincheck-details,vccgenerator,bincodes)',
+          'sources CSV (cache,local-db,binlist,handyapi,bincheck,bincheck-details,vccgenerator,bincodes)',
           (f.sources ?? DEFAULT_SOURCE_PRIORITY).join(',')
         )
         const list = csv
@@ -776,7 +776,7 @@ function printHelp(): void {
   print('  --json                emit machine-readable JSON')
   print('  --enable-scrapers     allow heavy browser-based sources (bincodes)')
   print('  --proxy <url>         outbound HTTP/SOCKS proxy')
-  print('  --sources a,b,c       restrict source priority (cache,local-db,binlist,bincheck,bincheck-details,vccgenerator,bincodes)')
+  print('  --sources a,b,c       restrict source priority (cache,local-db,binlist,handyapi,bincheck,bincheck-details,vccgenerator,bincodes)')
   print('  --cache <path>        cache file (default show/bin-cache.json)')
   print('  --local-db <path>     local BIN dataset (default accounts/bin-database.json)')
   print('')
