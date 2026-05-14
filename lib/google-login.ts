@@ -17,6 +17,7 @@ export type GoogleLoginFailReason =
   | 'bot_detection'
   | 'consent_screen_unexpected'
   | 'callback_timeout'
+  | 'speedbump_unresolvable'
   | 'kiro_postauth_failed'
   | 'unknown'
 
@@ -99,16 +100,98 @@ const CHALLENGE_PATH_REGEXES: Array<{ re: RegExp; kind: string }> = [
   { re: /\/signin\/recovery\b/i, kind: 'recovery' }
 ]
 
+// Speedbump primary-CTA selectors. Order matters — most specific first so the
+// click lands on the *real* primary action when several look-alike buttons are
+// in the DOM (gaplustos renders both "Continue" and "Cancel" siblings).
+//
+// Coverage:
+//   - English (en, en-GB):       Continue / Confirm / Yes, it was me / I understand
+//   - Indonesian (id):           Lanjutkan / Mengerti / Saya mengerti / Ya
+//   - Spanish (es):              Continuar / Entendido / Sí / De acuerdo
+//   - Portuguese (pt):           Continuar / Entendi / Sim / Concordo
+//   - French (fr):               Continuer / J'ai compris / Oui / Confirmer
+//   - German (de):               Weiter / Verstanden / Ja / Bestätigen
+//   - Japanese (ja):             続行 / 理解しました / はい
+//   - Chinese (zh-CN, zh-TW):    继续 / 繼續 / 我知道了 / 确认 / 確認
+//   - Korean (ko):               계속 / 확인 / 이해했습니다
+//   - Arabic (ar):               متابعة / فهمت
+//
+// Structural fallbacks: jsname="LgbsSe" is Google's universal primary-action
+// button class across speedbump / gaplustos / consent. data-primary-action-label
+// is the same button rendered through their newer Material wrapper. Both also
+// surface as div[role="button"] when the page is mobile-shaped.
 const SPEEDBUMP_CONFIRM_SELECTORS = [
-  // Real labels vary by locale / page version; match the common English and
-  // generic "primary blue button" shape.
+  // Most specific — Google's canonical primary-action button.
+  'button[jsname="LgbsSe"][data-primary-action-label]',
+  'div[role="button"][jsname="LgbsSe"][data-primary-action-label]',
+
+  // Localized labels. Keep "Continue/Confirm/I understand" first because
+  // gaplustos renders both English and translated labels in the same DOM
+  // when the user's account locale differs from the browser locale.
   'button:has-text("Continue")',
   'button:has-text("Confirm")',
-  'button:has-text("Yes")',
+  'button:has-text("I understand")',
+  'button:has-text("Yes, it was me")',
   'button:has-text("It was me")',
+  'button:has-text("Yes")',
+  'button:has-text("OK")',
+  'button:has-text("Got it")',
   'button:has-text("Not now")',
+  // id
+  'button:has-text("Lanjutkan")',
+  'button:has-text("Mengerti")',
+  'button:has-text("Saya mengerti")',
+  'button:has-text("Saya setuju")',
+  'button:has-text("Ya")',
+  // es / pt
+  'button:has-text("Continuar")',
+  'button:has-text("Entendido")',
+  'button:has-text("Entendi")',
+  'button:has-text("De acuerdo")',
+  'button:has-text("Sí")',
+  'button:has-text("Sim")',
+  'button:has-text("Concordo")',
+  // fr
+  'button:has-text("Continuer")',
+  "button:has-text(\"J'ai compris\")",
+  'button:has-text("Oui")',
+  'button:has-text("Confirmer")',
+  // de
+  'button:has-text("Weiter")',
+  'button:has-text("Verstanden")',
+  'button:has-text("Ja")',
+  'button:has-text("Bestätigen")',
+  // ja
+  'button:has-text("続行")',
+  'button:has-text("理解しました")',
+  'button:has-text("はい")',
+  // zh
+  'button:has-text("继续")',
+  'button:has-text("繼續")',
+  'button:has-text("我知道了")',
+  'button:has-text("确认")',
+  'button:has-text("確認")',
+  // ko
+  'button:has-text("계속")',
+  'button:has-text("확인")',
+  'button:has-text("이해했습니다")',
+  // ar
+  'button:has-text("متابعة")',
+  'button:has-text("فهمت")',
+
+  // Same labels but via div[role=button] (Material mobile / accessibility shell).
+  'div[role="button"]:has-text("Continue")',
+  'div[role="button"]:has-text("I understand")',
+  'div[role="button"]:has-text("Lanjutkan")',
+  'div[role="button"]:has-text("Mengerti")',
+  'div[role="button"]:has-text("Continuar")',
+  'div[role="button"]:has-text("Continuer")',
+  'div[role="button"]:has-text("Weiter")',
+
+  // Last-ditch structural match — any LgbsSe primary button. Risks clicking a
+  // non-primary action on multi-button pages, so it's last in the list.
   'button[jsname="LgbsSe"]',
-  'div[role="button"]:has-text("Continue")'
+  'div[role="button"][jsname="LgbsSe"]'
 ]
 
 const BOT_DETECTION_TEXTS = [
@@ -292,6 +375,7 @@ type Blocker =
   | { kind: 'wrong_password'; detail: string }
   | { kind: 'disabled'; detail: string }
   | { kind: 'consent' }
+  | { kind: 'speedbump_unresolvable'; detail: string }
 
 async function detectBlocker(page: Page): Promise<Blocker | null> {
   const url = page.url()
@@ -364,6 +448,8 @@ function classifyBlocker(b: Blocker | null): GoogleLoginResult {
       return { success: false, reason: 'account_disabled', detail: b.detail }
     case 'consent':
       return { success: false, reason: 'consent_screen_unexpected' }
+    case 'speedbump_unresolvable':
+      return { success: false, reason: 'speedbump_unresolvable', detail: b.detail }
   }
 }
 
@@ -372,14 +458,16 @@ async function waitForHostChange(
   allowedHosts: string[],
   timeoutMs: number,
   log: LogCallback
-): Promise<'matched' | 'blocker' | 'timeout'> {
+): Promise<'matched' | 'blocker' | 'timeout' | 'speedbump_unresolvable'> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     const hostname = new URL(page.url()).hostname
     if (allowedHosts.some((h) => hostname.endsWith(h))) return 'matched'
 
     // Auto-resolve the speedbump interstitial before it gets misclassified.
-    if (await handleSpeedbumpIfPresent(page, log)) {
+    const sbResult = await handleSpeedbumpIfPresent(page, log)
+    if (sbResult === 'unresolvable') return 'speedbump_unresolvable'
+    if (sbResult === 'clicked') {
       // Loop around; next iteration re-reads hostname.
       continue
     }
@@ -400,23 +488,190 @@ async function waitForHostChange(
   return 'timeout'
 }
 
-async function handleSpeedbumpIfPresent(page: Page, log: LogCallback): Promise<boolean> {
-  // Speedbump lives at /speedbump or /signin/speedbump — it's a soft "confirm
-  // you're you" prompt that auto-resolves with one click. Don't fail on it.
+/**
+ * Track speedbump-resolution failures per Page so we bail to a typed reason
+ * instead of letting the outer 60s loop burn through the entire budget on a
+ * single stuck interstitial.
+ *
+ * gaplustos sometimes renders with a JS-deferred primary CTA that never
+ * paints because the page is throttled / network-idle never fires. Without
+ * a hard cap we'd retry the same dead click ~7× per attempt and surface
+ * `callback_timeout` after 211s — masking the real failure mode.
+ */
+const SPEEDBUMP_FAIL_BUDGET = 3
+const SPEEDBUMP_FAIL_COUNTERS = new WeakMap<Page, { count: number; lastUrl: string }>()
+
+function bumpSpeedbumpFailure(page: Page, url: string): number {
+  const prev = SPEEDBUMP_FAIL_COUNTERS.get(page)
+  // Reset the counter if the URL drifted — a new speedbump variant deserves
+  // its own attempts, only consecutive failures on the SAME page count.
+  if (!prev || prev.lastUrl !== url) {
+    SPEEDBUMP_FAIL_COUNTERS.set(page, { count: 1, lastUrl: url })
+    return 1
+  }
+  const next = { count: prev.count + 1, lastUrl: url }
+  SPEEDBUMP_FAIL_COUNTERS.set(page, next)
+  return next.count
+}
+
+function clearSpeedbumpFailures(page: Page): void {
+  SPEEDBUMP_FAIL_COUNTERS.delete(page)
+}
+
+/**
+ * Last-resort primary-button click via in-page JS. Used when locator-based
+ * selectors all miss — typically because the CTA is a `<div role="button">`
+ * inside a c-wiz shadow shell or inside a Material wrapper that re-mounts
+ * after Playwright's selector engine snapshots the DOM.
+ *
+ * Strategy: enumerate every clickable element, score it by primary-action
+ * heuristics (jsname=LgbsSe > data-primary-action-label > localized label
+ * match > visible+styled-as-primary), pick the top candidate, and synthesize
+ * a real MouseEvent on it. Returns true if a click was dispatched.
+ */
+async function clickPrimaryButtonViaEval(page: Page): Promise<boolean> {
+  return page
+    .evaluate(() => {
+      const PRIMARY_LABELS = [
+        'continue',
+        'confirm',
+        'i understand',
+        'yes, it was me',
+        'it was me',
+        'lanjutkan',
+        'mengerti',
+        'saya mengerti',
+        'saya setuju',
+        'continuar',
+        'continuer',
+        'weiter',
+        '续行',
+        '继续',
+        '繼續',
+        '我知道了',
+        '확인',
+        '계속'
+      ]
+      const isVisible = (el: Element): boolean => {
+        const r = (el as HTMLElement).getBoundingClientRect()
+        const cs = window.getComputedStyle(el as HTMLElement)
+        return (
+          r.width > 12 &&
+          r.height > 12 &&
+          cs.visibility !== 'hidden' &&
+          cs.display !== 'none' &&
+          cs.opacity !== '0' &&
+          cs.pointerEvents !== 'none'
+        )
+      }
+      const candidates = Array.from(
+        document.querySelectorAll<HTMLElement>(
+          'button, [role="button"], a[jsname], div[jsname]'
+        )
+      ).filter(isVisible)
+      if (candidates.length === 0) return false
+      const score = (el: HTMLElement): number => {
+        let s = 0
+        const jsname = el.getAttribute('jsname') ?? ''
+        if (jsname === 'LgbsSe') s += 100
+        if (el.hasAttribute('data-primary-action-label')) s += 80
+        const label = (el.innerText ?? el.textContent ?? '').trim().toLowerCase()
+        if (PRIMARY_LABELS.some((l) => label.includes(l))) s += 50
+        const cs = window.getComputedStyle(el)
+        // Google's primary CTA is filled blue; secondary is text-only.
+        const bg = cs.backgroundColor
+        if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') s += 10
+        if (el.tagName.toLowerCase() === 'button') s += 5
+        // Penalise obvious cancel/dismiss labels so we never click them.
+        if (
+          /cancel|cancelar|annuler|abbrechen|キャンセル|取消|취소|إلغاء/i.test(label)
+        ) {
+          s -= 200
+        }
+        return s
+      }
+      const ranked = candidates
+        .map((el) => ({ el, s: score(el) }))
+        .sort((a, b) => b.s - a.s)
+      const top = ranked[0]
+      if (!top || top.s <= 0) return false
+      try {
+        top.el.scrollIntoView({ block: 'center', inline: 'center' })
+      } catch {}
+      const rect = top.el.getBoundingClientRect()
+      const cx = rect.left + rect.width / 2
+      const cy = rect.top + rect.height / 2
+      for (const type of ['mousedown', 'mouseup', 'click'] as const) {
+        try {
+          top.el.dispatchEvent(
+            new MouseEvent(type, {
+              bubbles: true,
+              cancelable: true,
+              view: window,
+              button: 0,
+              clientX: cx,
+              clientY: cy
+            })
+          )
+        } catch {}
+      }
+      try {
+        top.el.click()
+      } catch {}
+      return true
+    })
+    .catch(() => false)
+}
+
+async function handleSpeedbumpIfPresent(
+  page: Page,
+  log: LogCallback
+): Promise<'clicked' | 'absent' | 'unresolvable'> {
+  // Speedbump lives at /speedbump or /signin/speedbump (and the gaplustos
+  // sub-variant) — it's a soft "confirm you're you" prompt that auto-resolves
+  // with one click. Don't fail on it.
   const url = page.url()
-  if (!/\/speedbump/i.test(url)) return false
+  if (!/\/speedbump/i.test(url)) {
+    clearSpeedbumpFailures(page)
+    return 'absent'
+  }
 
   log('[google-login] Google speedbump detected, auto-confirming')
   // Wait a beat so the primary action button is rendered.
   await page.waitForTimeout(800)
-  const clicked = await clickFirst(page, SPEEDBUMP_CONFIRM_SELECTORS, 8000)
+
+  let clicked = await clickFirst(page, SPEEDBUMP_CONFIRM_SELECTORS, 8000)
+
+  // Locator-based selectors missed — fall back to in-page primary-button
+  // ranking. Catches Material/c-wiz shadow shells and locale labels we
+  // haven't enumerated.
   if (!clicked) {
-    log('[google-login] speedbump confirm button not found — giving up')
-    return false
+    log('[google-login] speedbump CTA not found via selectors, trying JS-eval primary-button fallback')
+    clicked = await clickPrimaryButtonViaEval(page)
+    if (clicked) {
+      log('[google-login] speedbump primary button clicked via JS-eval fallback')
+    }
   }
+
+  if (!clicked) {
+    const fails = bumpSpeedbumpFailure(page, url)
+    if (fails >= SPEEDBUMP_FAIL_BUDGET) {
+      log(
+        `[google-login] speedbump confirm button not found after ${fails} attempts on the same URL — giving up to avoid timeout thrashing`
+      )
+      return 'unresolvable'
+    }
+    log(`[google-login] speedbump confirm button not found (attempt ${fails}/${SPEEDBUMP_FAIL_BUDGET})`)
+    // Soft sleep so the next outer-loop iteration doesn't spin tight on
+    // a still-rendering page.
+    await page.waitForTimeout(1200)
+    return 'absent'
+  }
+
+  clearSpeedbumpFailures(page)
   // Let the navigation happen before the caller re-checks host.
   await page.waitForTimeout(1500)
-  return true
+  return 'clicked'
 }
 
 /**
@@ -695,6 +950,13 @@ async function clickGoogleSigninAndWaitForOAuthStart(
       log
     )
     if (onCognitoOrGoogle === 'matched') return null
+    if (onCognitoOrGoogle === 'speedbump_unresolvable') {
+      return {
+        success: false,
+        reason: 'speedbump_unresolvable',
+        detail: `stuck on ${page.url()}`
+      }
+    }
     if (onCognitoOrGoogle === 'blocker') return classifyBlocker(await detectBlocker(page))
 
     const stillOnSignin = isKiroHost(page.url()) && KIRO_SIGNIN_PATH_RE.test(page.url())
@@ -746,6 +1008,11 @@ async function registerViaKiroGoogleOnce(
   password: string,
   log: LogCallback
 ): Promise<GoogleLoginResult> {
+  // Reset the per-page speedbump failure counter so each fresh attempt gets
+  // its own budget — the WeakMap is keyed on Page and the same Page object is
+  // reused across the outer 2-attempt OAuth retry loop.
+  clearSpeedbumpFailures(page)
+
   // Step 1 — load Kiro signin page
   const opened = await openFreshKiroSignin(page, context, log)
   if (opened) return opened
@@ -772,6 +1039,13 @@ async function registerViaKiroGoogleOnce(
   if (!page.url().includes('accounts.google.com')) {
     const onGoogle = await waitForHostChange(page, ['accounts.google.com'], 15000, log)
     if (onGoogle === 'blocker') return classifyBlocker(await detectBlocker(page))
+    if (onGoogle === 'speedbump_unresolvable') {
+      return {
+        success: false,
+        reason: 'speedbump_unresolvable',
+        detail: `stuck on ${page.url()}`
+      }
+    }
     if (onGoogle === 'timeout') {
       return {
         success: false,
@@ -833,7 +1107,15 @@ async function registerViaKiroGoogleOnce(
         reachedCallbackWithoutPassword = true
         break
       }
-      if (await handleSpeedbumpIfPresent(page, log)) continue
+      const sb = await handleSpeedbumpIfPresent(page, log)
+      if (sb === 'unresolvable') {
+        return {
+          success: false,
+          reason: 'speedbump_unresolvable',
+          detail: `stuck on ${page.url()} before password entry`
+        }
+      }
+      if (sb === 'clicked') continue
       // Some Workspace accounts are routed straight to OAuth consent if the
       // tenant has SSO enabled. Auto-resolve before classifying as a blocker.
       if (await handleGoogleOAuthConsentIfPresent(page, log)) continue
@@ -896,7 +1178,15 @@ async function registerViaKiroGoogleOnce(
       // page and must not be treated as a successful login.
       return validateKiroPostAuth(page, email, log)
     }
-    if (await handleSpeedbumpIfPresent(page, log)) continue
+    const sb = await handleSpeedbumpIfPresent(page, log)
+    if (sb === 'unresolvable') {
+      return {
+        success: false,
+        reason: 'speedbump_unresolvable',
+        detail: `stuck on ${page.url()} during OAuth callback`
+      }
+    }
+    if (sb === 'clicked') continue
     // Auto-resolve the Google OAuth scope-consent screen — fires for fresh
     // GSuite accounts that have never authorized Kiro before. Without this
     // we'd misclassify it via CONSENT_TEXTS as `consent_screen_unexpected`

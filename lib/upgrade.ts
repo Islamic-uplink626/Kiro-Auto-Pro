@@ -8,9 +8,12 @@ import {
   type UpgradeClickResult
 } from './kiro-pro'
 import {
-  runStripeCheckout,
+  clearStripeForm,
+  fillStripeCheckout,
+  submitAndClassify,
   type StripeSubmitOutcome
 } from './stripe-checkout'
+import { applyStripeStealthContext } from './stripe-stealth'
 import { registerViaKiroGoogle } from './google-login'
 import type { KiroSession } from './google-login'
 import type { VccEntry } from './vcc'
@@ -318,6 +321,19 @@ export async function upgradeKiroAccount(
         geoip,
         log
       })
+      // Wire extra-stealth init scripts onto the BrowserContext before any
+      // navigation lands on Stripe — the script self-gates on the host so
+      // it's a no-op on Kiro / Google / Cognito and fires only on
+      // checkout.stripe.com.
+      try {
+        await applyStripeStealthContext(browserSession.context, engine, log)
+      } catch (e) {
+        log(
+          `[upgrade] WARN: failed to install Stripe stealth init script: ${
+            e instanceof Error ? e.message : String(e)
+          } — continuing`
+        )
+      }
     } catch (e) {
       return {
         success: false,
@@ -542,6 +558,9 @@ export async function upgradeKiroAccount(
       // consumes a card and re-requests the form; a 3DS escalates out.
       let lastOutcome: StripeSubmitOutcome | null = null
       let consumedVcc: { id: string; last4: string } | null = null
+      // Track whether the form has been filled at least once so we know
+      // whether to clear+refill or fill fresh on the next attempt.
+      let formFilledOnce = false
 
       for (let attempt = 0; attempt < maxVccAttempts; attempt++) {
         const claim = await vccPool.claimNext()
@@ -569,11 +588,29 @@ export async function upgradeKiroAccount(
 
         let outcome: StripeSubmitOutcome
         try {
-          outcome = await runStripeCheckout(stripePage, vcc, log)
+          if (formFilledOnce) {
+            // Reset card fields between attempts so we don't lose the Stripe
+            // session. Billing fields persist (Stripe keeps them) — fill is
+            // idempotent and re-types only the card columns.
+            await clearStripeForm(stripePage, log)
+          }
+          await fillStripeCheckout(stripePage, vcc, log, {
+            // Skip prewarm on retry — already warmed once.
+            skipPrewarm: formFilledOnce
+          })
+          formFilledOnce = true
+          outcome = await submitAndClassify(stripePage, log)
         } catch (e) {
-          outcome = {
-            kind: 'error',
-            message: e instanceof Error ? e.message : String(e)
+          const msg = e instanceof Error ? e.message : String(e)
+          // fillStripeCheckout throws on definitive typing failures
+          // (cardNumber / cardExpiry / cardCvc could not be typed cleanly).
+          // Map those to `validation` so the VCC is marked invalid and the
+          // outer loop can advance to the next card if maxVccAttempts > 1.
+          // Anything else is a generic error and aborts.
+          if (/(card number|expiry|cvc) could not be typed/i.test(msg)) {
+            outcome = { kind: 'validation', message: msg }
+          } else {
+            outcome = { kind: 'error', message: msg }
           }
         }
 
@@ -666,10 +703,24 @@ export async function upgradeKiroAccount(
         }
 
         if (outcome.kind === 'declined') {
-          log(`[upgrade] card declined — trying next VCC if available`)
+          log(
+            `[upgrade] card declined (${outcome.code ?? 'unknown'}: ${outcome.message}) — trying next VCC if available`
+          )
           await claim.release({
             status: 'declined',
-            reason: outcome.message,
+            reason: `${outcome.code ?? 'declined'}: ${outcome.message}`,
+            usedBy: email
+          })
+          continue
+        }
+
+        if (outcome.kind === 'unsupported') {
+          // Functionally a decline (issuer/scheme rejection) but tag it
+          // distinctly so a future BIN filter can avoid the same scheme.
+          log(`[upgrade] payment not supported — marking VCC and trying next: ${outcome.message}`)
+          await claim.release({
+            status: 'invalid',
+            reason: `unsupported: ${outcome.message}`,
             usedBy: email
           })
           continue
@@ -687,6 +738,12 @@ export async function upgradeKiroAccount(
 
         if (outcome.kind === 'timeout') {
           log(`[upgrade] Stripe submit timed out — aborting this account`)
+          // Diagnostic dump for offline analysis.
+          await dumpPageState(
+            stripePage,
+            `${email}.stripe_timeout`,
+            log
+          ).catch(() => null)
           await claim.release({
             status: 'failed',
             reason: outcome.detail ?? 'timeout',
@@ -706,6 +763,11 @@ export async function upgradeKiroAccount(
 
         // outcome.kind === 'error'
         log(`[upgrade] Stripe error: ${outcome.message}`)
+        await dumpPageState(
+          stripePage,
+          `${email}.stripe_error`,
+          log
+        ).catch(() => null)
         await claim.release({
           status: 'failed',
           reason: outcome.message,
@@ -738,11 +800,13 @@ export async function upgradeKiroAccount(
         const reason: UpgradeReason =
           lastOutcome?.kind === 'declined'
             ? 'stripe_declined'
-            : lastOutcome?.kind === 'validation'
-              ? 'stripe_validation'
-              : lastOutcome?.kind === '3ds'
-                ? 'threeds_required_headless'
-                : 'stripe_error'
+            : lastOutcome?.kind === 'unsupported'
+              ? 'stripe_declined'
+              : lastOutcome?.kind === 'validation'
+                ? 'stripe_validation'
+                : lastOutcome?.kind === '3ds'
+                  ? 'threeds_required_headless'
+                  : 'stripe_error'
         return {
           success: false,
           email: email,
